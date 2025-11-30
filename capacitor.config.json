@@ -1,0 +1,11 @@
+{
+  "appId": "com.cardkeeper.app",
+  "appName": "Card Keeper App",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "npmClient": "npm",
+  "linuxAndroidStudioPath": "/usr/bin/android-studio",
+  "server": {
+    "cleartext": true
+  }
+}
