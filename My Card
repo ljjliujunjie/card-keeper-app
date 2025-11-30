@@ -1,0 +1,842 @@
+import React, { useState, useEffect } from 'react';
+import { 
+  CreditCard, 
+  Plus, 
+  MapPin, 
+  Calendar, 
+  ChevronRight, 
+  Wallet, 
+  History, 
+  TrendingDown, 
+  TrendingUp,
+  X,
+  Trash2,
+  Store,
+  Hash,
+  Edit,
+  LayoutList,
+  LayoutGrid,
+  Pencil,
+  Check,
+  Percent
+} from 'lucide-react';
+
+// Mock initial data
+const INITIAL_DATA = [
+  {
+    id: '1',
+    storeName: '极速造型沙龙',
+    balance: 1580,
+    cardNumber: 'VIP-8802',
+    location: '万达广场 3F',
+    startDate: '2023-10-15',
+    color: 'from-purple-500 to-indigo-600',
+    discount: 0.8, // 新增：8折折扣乘数
+    transactions: [
+      { id: 't1', type: 'recharge', amount: 2000, realAmount: 1500, giftAmount: 500, date: '2023-10-15 14:30', note: '开业活动充值' },
+      // 更新历史交易结构以包含折扣信息 (amount 是实际扣除金额)
+      { id: 't2', type: 'expense', amount: 336, preDiscountAmount: 420, discountRate: 0.8, date: '2023-11-01 18:20', note: '剪发+染发' } 
+    ]
+  },
+  {
+    id: '2',
+    storeName: '山姆会员店',
+    balance: 200,
+    cardNumber: '260000213',
+    location: '高新区店',
+    startDate: '2024-01-10',
+    color: 'from-blue-500 to-cyan-600',
+    discount: 1.0, // 新增：无折扣
+    transactions: [
+      { id: 't3', type: 'recharge', amount: 260, realAmount: 260, giftAmount: 0, date: '2024-01-10 10:00', note: '续费年卡' },
+      // 更新历史交易结构
+      { id: 't4', type: 'expense', amount: 60, preDiscountAmount: 60, discountRate: 1.0, date: '2024-02-14 11:30', note: '极速达运费抵扣' }
+    ]
+  }
+];
+
+const COLORS = [
+  'from-blue-500 to-cyan-600',
+  'from-purple-500 to-indigo-600',
+  'from-emerald-500 to-teal-600',
+  'from-rose-500 to-pink-600',
+  'from-amber-500 to-orange-600',
+  'from-slate-700 to-slate-900',
+  'from-pink-500 to-rose-500', 
+  'from-indigo-400 to-cyan-400'
+];
+
+// Helper function to safely get transaction amount (for older data compatibility)
+// For expense, old data's 'amount' was the final deducted amount.
+const getExpenseAmount = (t, key) => {
+    // If it's a new transaction format, use the specific key.
+    if (t.preDiscountAmount !== undefined) {
+        return key === 'pre' ? t.preDiscountAmount : t.amount;
+    }
+    // For old format, pre-discount and actual amount are the same.
+    return t.amount;
+}
+
+export default function CardKeeperApp() {
+  // State
+  const [cards, setCards] = useState(() => {
+    const saved = localStorage.getItem('card_keeper_data_v1');
+    return saved ? JSON.parse(saved) : INITIAL_DATA;
+  });
+  
+  const [view, setView] = useState('dashboard'); // 'dashboard', 'detail', 'add'
+  const [viewMode, setViewMode] = useState('list'); // 'list' or 'grid'
+  const [activeCard, setActiveCard] = useState(null);
+  
+  // Modal States
+  const [showTransactionModal, setShowTransactionModal] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
+  
+  // Transaction Editing State
+  const [transactionType, setTransactionType] = useState('expense'); 
+  const [editingTransaction, setEditingTransaction] = useState(null); // If null, creating new. If set, editing.
+
+  // Persist data
+  useEffect(() => {
+    localStorage.setItem('card_keeper_data_v1', JSON.stringify(cards));
+  }, [cards]);
+
+  // Calculations
+  const totalBalance = cards.reduce((sum, card) => sum + Number(card.balance), 0);
+
+  // --- Handlers: Card Management ---
+
+  const handleDeleteCard = (id) => {
+    if (confirm('确定要删除这张卡吗？所有记录将无法恢复。')) {
+      setCards(cards.filter(c => c.id !== id));
+      setView('dashboard');
+    }
+  };
+
+  const handleUpdateCard = (updatedFields) => {
+    // 转换折扣百分比字符串为折扣乘数 (例如 "80" -> 0.8)
+    const discountMultiplier = Number(updatedFields.discountString || 100) / 100;
+
+    const updatedCard = { 
+      ...activeCard, 
+      ...updatedFields, 
+      discount: discountMultiplier // 存储折扣乘数
+    };
+    delete updatedCard.discountString; // 清理临时输入字段
+
+    setCards(cards.map(c => c.id === activeCard.id ? updatedCard : c));
+    setActiveCard(updatedCard);
+    setShowEditModal(false);
+  };
+
+  const handleAddCard = (newCard) => {
+    // 转换折扣百分比字符串为折扣乘数 (例如 "80" -> 0.8)
+    const discountMultiplier = Number(newCard.discountString || 100) / 100;
+
+    const cardData = {
+      ...newCard,
+      id: Date.now().toString(),
+      color: COLORS[Math.floor(Math.random() * COLORS.length)],
+      discount: discountMultiplier, // 存储折扣乘数
+      transactions: [
+        {
+          id: Date.now().toString(),
+          type: 'recharge',
+          amount: Number(newCard.balance),
+          realAmount: Number(newCard.realAmount || newCard.balance),
+          giftAmount: Number(newCard.giftAmount || 0),
+          date: new Date().toLocaleString('zh-CN', { hour12: false }),
+          note: '初始录入'
+        }
+      ]
+    };
+    setCards([cardData, ...cards]);
+    setView('dashboard');
+  };
+
+  // --- Handlers: Transaction Management ---
+
+  // Create or Update Transaction
+  // originalAmount: 充值总额 或 消费折扣前金额
+  // finalAmount: 实际扣款金额 (仅在 expense 且有折扣时使用)
+  const handleSaveTransaction = (originalAmount, note, realAmount = 0, giftAmount = 0, finalAmount = null) => {
+    if (!activeCard) return;
+
+    // 确定用于余额计算的金额：如果是expense且有finalAmount，则用finalAmount (折扣后金额), 否则用originalAmount (充值总额)
+    const amountToUse = (transactionType === 'expense' && finalAmount !== null) 
+                       ? Number(finalAmount) 
+                       : Number(originalAmount); 
+
+    const numOriginalAmount = Number(originalAmount);
+    
+    let updatedCard = { ...activeCard };
+    
+    if (editingTransaction) {
+      // 1. Revert old transaction effect
+      const oldAmount = Number(editingTransaction.amount); // old amount is the final deducted/recharged amount
+      if (editingTransaction.type === 'expense') {
+        updatedCard.balance = Number(updatedCard.balance) + oldAmount;
+      } else {
+        updatedCard.balance = Number(updatedCard.balance) - oldAmount;
+      }
+
+      // 2. Apply new transaction effect
+      if (transactionType === 'expense') {
+        updatedCard.balance -= amountToUse; 
+      } else {
+        updatedCard.balance += amountToUse; 
+      }
+
+      // 3. Update the transaction in the list
+      updatedCard.transactions = updatedCard.transactions.map(t => 
+        t.id === editingTransaction.id 
+          ? {
+              ...t,
+              amount: amountToUse, // 最终扣款/充值金额
+              preDiscountAmount: transactionType === 'expense' ? numOriginalAmount : undefined, // 折扣前金额
+              discountRate: transactionType === 'expense' ? activeCard.discount : undefined, // 折扣率
+              realAmount: transactionType === 'recharge' ? Number(realAmount) : undefined,
+              giftAmount: transactionType === 'recharge' ? Number(giftAmount) : undefined,
+              note: note,
+              type: transactionType,
+            }
+          : t
+      );
+
+    } else {
+      // Create New
+      const newBalance = transactionType === 'expense' 
+        ? Number(activeCard.balance) - amountToUse
+        : Number(activeCard.balance) + amountToUse;
+
+      const newTransaction = {
+        id: Date.now().toString(),
+        type: transactionType,
+        amount: amountToUse, // 最终扣款/充值金额
+        preDiscountAmount: transactionType === 'expense' ? numOriginalAmount : undefined,
+        discountRate: transactionType === 'expense' ? activeCard.discount : undefined,
+        realAmount: transactionType === 'recharge' ? Number(realAmount) : undefined,
+        giftAmount: transactionType === 'recharge' ? Number(giftAmount) : undefined,
+        date: new Date().toLocaleString('zh-CN', { hour12: false }),
+        note: note || (transactionType === 'expense' ? '日常消费' : '账户充值')
+      };
+
+      updatedCard.balance = newBalance;
+      updatedCard.transactions = [newTransaction, ...updatedCard.transactions];
+    }
+
+    setCards(cards.map(c => c.id === activeCard.id ? updatedCard : c));
+    setActiveCard(updatedCard);
+    setShowTransactionModal(false);
+    setEditingTransaction(null);
+  };
+
+  const handleDeleteTransaction = (tId) => {
+    if (!confirm('确定删除这条记录吗？余额将会自动回滚。')) return;
+
+    const transaction = activeCard.transactions.find(t => t.id === tId);
+    if (!transaction) return;
+
+    let newBalance = Number(activeCard.balance);
+    
+    // Reverse the effect (use the final deducted/recharged amount)
+    if (transaction.type === 'expense') {
+      newBalance += Number(transaction.amount); 
+    } else {
+      newBalance -= Number(transaction.amount);
+    }
+
+    const updatedCard = {
+      ...activeCard,
+      balance: newBalance,
+      transactions: activeCard.transactions.filter(t => t.id !== tId)
+    };
+
+    setCards(cards.map(c => c.id === activeCard.id ? updatedCard : c));
+    setActiveCard(updatedCard);
+  };
+
+  const openEditTransaction = (transaction) => {
+    setTransactionType(transaction.type);
+    setEditingTransaction(transaction);
+    setShowTransactionModal(true);
+  };
+
+  // --- Components ---
+
+  const CardItem = ({ card, onClick, mode }) => {
+    const isGrid = mode === 'grid';
+    const discountText = card.discount && card.discount < 1.0 
+      ? `${(card.discount * 10).toFixed(1)}折` 
+      : (card.discount === 1.0 ? '无折扣' : 'N/A');
+    
+    return (
+      <div 
+        onClick={onClick}
+        className={`relative overflow-hidden rounded-2xl text-white shadow-lg bg-gradient-to-br ${card.color} cursor-pointer transform transition hover:shadow-xl hover:scale-[1.02]
+          ${isGrid ? 'aspect-[4/5] p-4 flex flex-col justify-between' : 'p-5'}`}
+      >
+        {/* Top Row */}
+        <div className="relative z-10 flex justify-between items-start">
+          <div className={`font-bold tracking-wide flex items-center gap-2 ${isGrid ? 'text-base' : 'text-lg'}`}>
+            <Store size={isGrid ? 16 : 18} className="opacity-80" />
+            <span className="truncate">{card.storeName}</span>
+          </div>
+          <div className="text-white/80 text-xs bg-black/20 px-2 py-1 rounded-full backdrop-blur-sm flex items-center gap-1">
+             <Percent size={10} /> {discountText}
+          </div>
+        </div>
+        
+        {/* Middle - Balance */}
+        <div className="relative z-10">
+          <div className={`text-white/70 mb-1 uppercase tracking-wider ${isGrid ? 'text-[10px] mt-4' : 'text-xs mt-8'}`}>当前余额</div>
+          <div className={`font-bold font-mono ${isGrid ? 'text-2xl truncate' : 'text-3xl'}`}>¥ {Number(card.balance).toLocaleString()}</div>
+        </div>
+
+        {/* Bottom */}
+        <div className="relative z-10 flex justify-between items-end text-xs text-white/60 font-mono mt-auto">
+          {!isGrid && (
+            <div className="flex items-center gap-1">
+              <Hash size={12} />
+              {card.cardNumber || '无卡号'}
+            </div>
+          )}
+          <div className={isGrid ? 'w-full text-right mt-2' : ''}>
+            {card.transactions.length > 0 ? (isGrid ? card.transactions[0].date.split(' ')[0] : '最近变动: ' + card.transactions[0].date.split(' ')[0]) : '无记录'}
+          </div>
+        </div>
+        
+        {/* Decorative Circles */}
+        <div className="absolute -top-10 -right-10 w-40 h-40 bg-white/10 rounded-full blur-2xl"></div>
+        <div className="absolute -bottom-10 -left-10 w-32 h-32 bg-black/10 rounded-full blur-2xl"></div>
+      </div>
+    );
+  };
+
+  const EditCardModal = ({ card, onSave, onCancel }) => {
+    const [formData, setFormData] = useState({
+      storeName: card.storeName,
+      cardNumber: card.cardNumber || '',
+      location: card.location || '',
+      startDate: card.startDate || '',
+      color: card.color || COLORS[0],
+      // 将折扣乘数 (0.8) 转换为百分比字符串 ("80") 用于输入框显示
+      discountString: ((card.discount || 1.0) * 100).toString() 
+    });
+
+    return (
+      <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
+        <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl overflow-hidden transform transition-all scale-100 max-h-[90vh] overflow-y-auto">
+          <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50">
+            <h2 className="font-bold text-lg text-gray-800">编辑卡片信息</h2>
+            <button onClick={onCancel} className="p-1 rounded-full hover:bg-gray-200 text-gray-500"><X size={20} /></button>
+          </div>
+          
+          <form onSubmit={(e) => { e.preventDefault(); onSave(formData); }} className="p-6 space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">卡片颜色</label>
+              <div className="flex flex-wrap gap-3">
+                {COLORS.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => setFormData({ ...formData, color: c })}
+                    className={`w-8 h-8 rounded-full bg-gradient-to-br ${c} transition-transform hover:scale-110 flex items-center justify-center ring-2 ring-offset-2 ${formData.color === c ? 'ring-gray-400 scale-110' : 'ring-transparent'}`}
+                  >
+                    {formData.color === c && <Check size={14} className="text-white" />}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">店铺名称</label>
+              <input required type="text" className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition" 
+                value={formData.storeName} onChange={e => setFormData({...formData, storeName: e.target.value})} />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">会员折扣 (%)</label>
+              <p className="text-xs text-gray-500 mb-1">例如：80 表示 8折, 100 表示无折扣</p>
+              <div className="relative">
+                <input required type="number" min="1" max="100" className="w-full p-3 pr-10 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition" 
+                  value={formData.discountString} onChange={e => setFormData({...formData, discountString: e.target.value})} />
+                <span className="absolute right-3 top-3.5 text-gray-400 font-bold">%</span>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">会员卡号</label>
+              <input type="text" className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition" 
+                value={formData.cardNumber} onChange={e => setFormData({...formData, cardNumber: e.target.value})} />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">店铺位置</label>
+              <div className="relative">
+                <MapPin size={18} className="absolute left-3 top-3.5 text-gray-400" />
+                <input type="text" className="w-full p-3 pl-10 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition" 
+                  value={formData.location} onChange={e => setFormData({...formData, location: e.target.value})} />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">开卡时间</label>
+              <input type="date" className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition" 
+                value={formData.startDate} onChange={e => setFormData({...formData, startDate: e.target.value})} />
+            </div>
+
+            <button type="submit" className="w-full py-3.5 bg-gray-900 text-white rounded-xl font-bold shadow-lg hover:bg-gray-800 transition transform hover:-translate-y-0.5">
+              保存修改
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  };
+
+  const TransactionModal = ({ type, initialData, onClose, onConfirm, cardDiscount }) => {
+    // If initialData is present, we are in Edit Mode
+    const isEdit = !!initialData;
+    
+    // 如果是消费类型，金额输入框对应折扣前的金额
+    const [preDiscountAmount, setPreDiscountAmount] = useState(
+      isEdit && initialData.type === 'expense'
+        ? (initialData.preDiscountAmount || initialData.amount) // 兼容旧数据，旧数据的amount是实际扣除金额
+        : ''
+    );
+    const [realAmount, setRealAmount] = useState(isEdit ? initialData.realAmount : '');
+    const [giftAmount, setGiftAmount] = useState(isEdit ? initialData.giftAmount : '');
+    const [note, setNote] = useState(isEdit ? initialData.note : '');
+
+    // 计算实际扣款金额
+    const discountRate = type === 'expense' ? (cardDiscount || 1.0) : 1.0;
+    const finalAmount = type === 'expense' 
+      ? (Number(preDiscountAmount || 0) * discountRate)
+      : (Number(realAmount || 0) + Number(giftAmount || 0));
+
+
+    const handleSubmit = (e) => {
+      e.preventDefault();
+      const numOriginalAmount = type === 'expense' ? Number(preDiscountAmount || 0) : finalAmount;
+
+      if (type === 'recharge') {
+        // 充值逻辑：finalAmount 就是 total，作为 originalAmount 传递
+        onConfirm(finalAmount, note, realAmount, giftAmount); 
+      } else {
+        // 消费逻辑：传递 折扣前金额 (numOriginalAmount) 和 折扣后金额 (finalAmount)
+        onConfirm(numOriginalAmount, note, 0, 0, finalAmount); 
+      }
+    };
+
+    return (
+      <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+        <div className="bg-white w-full max-w-sm rounded-2xl shadow-2xl p-6 transform transition-all scale-100">
+          <div className="flex justify-between items-center mb-6">
+            <h3 className="text-xl font-bold text-gray-900">
+              {isEdit ? '修改记录' : (type === 'expense' ? '记录消费' : '充值/续费')}
+            </h3>
+            <button onClick={onClose} className="p-1 rounded-full hover:bg-gray-100"><X size={20} /></button>
+          </div>
+
+          <form onSubmit={handleSubmit} className="space-y-4">
+            {type === 'recharge' ? (
+              <div className="grid grid-cols-2 gap-3">
+                 <div>
+                  <label className="text-xs text-gray-500 font-medium ml-1">充值金额</label>
+                  <div className="relative mt-1">
+                    <span className="absolute left-3 top-3 text-gray-400 font-bold">¥</span>
+                    <input autoFocus={!isEdit} type="number" required className="w-full p-3 pl-8 bg-gray-50 rounded-xl border border-gray-200 text-lg font-bold outline-none focus:ring-2 focus:ring-green-500" placeholder="0"
+                      value={realAmount} onChange={e => setRealAmount(e.target.value)} />
+                  </div>
+                </div>
+                 <div>
+                  <label className="text-xs text-gray-500 font-medium ml-1">赠送金额</label>
+                  <div className="relative mt-1">
+                    <span className="absolute left-3 top-3 text-gray-400 font-bold">¥</span>
+                    <input type="number" className="w-full p-3 pl-8 bg-gray-50 rounded-xl border border-gray-200 text-lg font-bold outline-none focus:ring-2 focus:ring-green-500" placeholder="0"
+                      value={giftAmount} onChange={e => setGiftAmount(e.target.value)} />
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <label className="text-xs text-gray-500 font-medium ml-1">折扣前消费金额</label>
+                <div className="relative mt-1">
+                  <span className="absolute left-4 top-4 text-gray-900 font-bold text-2xl">¥</span>
+                  <input autoFocus={!isEdit} type="number" required className="w-full p-4 pl-10 bg-gray-50 rounded-xl border border-gray-200 text-3xl font-bold text-gray-900 outline-none focus:ring-2 focus:ring-red-500" placeholder="0.00"
+                    value={preDiscountAmount} onChange={e => setPreDiscountAmount(e.target.value)} />
+                </div>
+                
+                {/* 折扣计算显示 */}
+                {discountRate < 1.0 && (
+                  <div className="mt-2 text-sm text-gray-700 bg-red-50 border border-red-200 p-3 rounded-xl flex justify-between items-center font-medium">
+                    <span className="flex items-center gap-1">
+                        <Percent size={16} className="text-red-600"/>
+                        {discountRate * 10}折 (<span className="line-through">¥{Number(preDiscountAmount || 0).toLocaleString()}</span>) 
+                        实际扣款:
+                    </span>
+                    <span className="font-bold text-lg text-red-700">¥ {finalAmount.toFixed(2)}</span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div>
+              <label className="text-xs text-gray-500 font-medium ml-1">备注 (可选)</label>
+              <input type="text" className="w-full mt-1 p-3 bg-gray-50 rounded-xl border border-gray-200 outline-none focus:ring-2 focus:ring-gray-400" placeholder={type === 'expense' ? "例如：洗剪吹" : "例如：店庆活动"}
+                value={note} onChange={e => setNote(e.target.value)} />
+            </div>
+
+            <button type="submit" className={`w-full py-3.5 rounded-xl font-bold text-white shadow-md transform active:scale-95 transition ${type === 'expense' ? 'bg-gray-900' : 'bg-green-600'}`}>
+              {isEdit ? '保存修改' : (type === 'expense' ? '确认扣款' : '确认充值')}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  };
+
+  const DetailView = () => {
+    if (!activeCard) return null;
+
+    const discountText = activeCard.discount && activeCard.discount < 1.0 
+      ? `${(activeCard.discount * 10).toFixed(1)}折` 
+      : (activeCard.discount === 1.0 ? '无折扣' : 'N/A');
+
+    return (
+      <div className="fixed inset-0 bg-gray-50 z-40 overflow-y-auto pb-20">
+        {/* Detail Header */}
+        <div className={`relative ${activeCard.color.replace('from-', 'bg-')} bg-gray-900 text-white pb-6`}>
+           <div className={`absolute inset-0 bg-gradient-to-br ${activeCard.color} opacity-100`}></div>
+           
+           <div className="relative z-10">
+             <div className="px-4 py-4 flex items-center justify-between">
+                <button onClick={() => setView('dashboard')} className="p-2 bg-white/20 backdrop-blur-md rounded-full hover:bg-white/30 transition">
+                  <ChevronRight size={24} className="transform rotate-180" />
+                </button>
+                <div className="font-bold text-lg">卡片详情</div>
+                <div className="flex gap-2">
+                  <button onClick={() => setShowEditModal(true)} className="p-2 bg-white/20 backdrop-blur-md rounded-full hover:bg-white/30 transition">
+                    <Edit size={20} />
+                  </button>
+                  <button onClick={() => handleDeleteCard(activeCard.id)} className="p-2 bg-white/20 backdrop-blur-md rounded-full hover:bg-red-500/80 transition">
+                    <Trash2 size={20} />
+                  </button>
+                </div>
+             </div>
+
+             <div className="px-6 mt-4 flex flex-col items-center">
+                <h1 className="text-2xl font-bold tracking-wide flex items-center gap-2">
+                  <Store /> {activeCard.storeName}
+                </h1>
+                <div className="mt-4 text-white/80 text-sm uppercase tracking-widest">当前余额</div>
+                <div className="text-5xl font-bold font-mono mt-1">¥ {Number(activeCard.balance).toLocaleString()}</div>
+             </div>
+
+             <div className="px-6 mt-8 grid grid-cols-2 gap-4">
+                <button 
+                  onClick={() => { setTransactionType('recharge'); setEditingTransaction(null); setShowTransactionModal(true); }}
+                  className="bg-white/20 backdrop-blur-md border border-white/30 text-white py-3 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-white/30 transition"
+                >
+                  <Plus size={18} /> 充值/续费
+                </button>
+                <button 
+                  onClick={() => { setTransactionType('expense'); setEditingTransaction(null); setShowTransactionModal(true); }}
+                  className="bg-white text-gray-900 py-3 rounded-xl font-bold flex items-center justify-center gap-2 shadow-lg hover:bg-gray-100 transition"
+                >
+                  <TrendingDown size={18} /> 记一笔
+                </button>
+             </div>
+           </div>
+        </div>
+
+        {/* Card Info */}
+        <div className="px-4 -mt-4 relative z-20">
+          <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4 grid grid-cols-2 gap-y-4 text-sm">
+             <div className="flex flex-col">
+               <span className="text-gray-400 text-xs mb-1 flex items-center gap-1"><Hash size={12}/> 卡号</span>
+               <span className="font-medium text-gray-800">{activeCard.cardNumber || '未填写'}</span>
+             </div>
+             <div className="flex flex-col">
+               <span className="text-gray-400 text-xs mb-1 flex items-center gap-1"><MapPin size={12}/> 位置</span>
+               <span className="font-medium text-gray-800 truncate">{activeCard.location || '未填写'}</span>
+             </div>
+             <div className="flex flex-col">
+               <span className="text-gray-400 text-xs mb-1 flex items-center gap-1"><Calendar size={12}/> 开卡日期</span>
+               <span className="font-medium text-gray-800">{activeCard.startDate || '未填写'}</span>
+             </div>
+             <div className="flex flex-col">
+               <span className="text-gray-400 text-xs mb-1 flex items-center gap-1"><Percent size={12}/> 会员折扣</span>
+               <span className="font-medium text-gray-800">{discountText}</span>
+             </div>
+          </div>
+        </div>
+
+        {/* Transaction History */}
+        <div className="px-4 mt-6">
+          <h3 className="font-bold text-gray-800 mb-4 flex items-center gap-2">
+            <History size={18} className="text-gray-500" /> 交易记录
+          </h3>
+          <div className="space-y-3 pb-8">
+            {activeCard.transactions.length === 0 ? (
+              <div className="text-center py-10 text-gray-400 text-sm bg-white rounded-xl border border-dashed border-gray-200">
+                暂无交易记录
+              </div>
+            ) : (
+              activeCard.transactions.map((t) => (
+                <div key={t.id} className="group bg-white p-4 rounded-xl border border-gray-100 shadow-sm flex justify-between items-center transition hover:shadow-md hover:border-blue-100 relative overflow-hidden">
+                   <div className="flex items-start gap-3 flex-1">
+                      <div className={`mt-1 p-2 rounded-full ${t.type === 'expense' ? 'bg-orange-50 text-orange-500' : 'bg-green-50 text-green-500'}`}>
+                        {t.type === 'expense' ? <TrendingDown size={16} /> : <TrendingUp size={16} />}
+                      </div>
+                      <div>
+                        <div className="font-bold text-gray-800">{t.note}</div>
+                        <div className="text-xs text-gray-400 mt-1">{t.date}</div>
+                        {t.type === 'recharge' && (t.giftAmount > 0) && (
+                          <div className="text-xs text-green-600 mt-1 bg-green-50 inline-block px-1.5 py-0.5 rounded">
+                            含赠送 ¥{t.giftAmount}
+                          </div>
+                        )}
+                        {/* 折扣信息 */}
+                        {t.type === 'expense' && t.discountRate && t.discountRate < 1.0 && (
+                            <div className="text-xs text-red-600 mt-1 bg-red-50 inline-block px-1.5 py-0.5 rounded">
+                              {t.discountRate * 10}折 (原价 ¥{Number(t.preDiscountAmount || t.amount).toLocaleString()})
+                            </div>
+                        )}
+                      </div>
+                   </div>
+                   
+                   {/* Amount Display */}
+                   <div className={`font-mono font-bold text-lg mr-2 ${t.type === 'expense' ? 'text-gray-900' : 'text-green-600'}`}>
+                     {t.type === 'expense' ? '-' : '+'} {Number(t.amount).toLocaleString()}
+                   </div>
+
+                   {/* Actions (visible on hover or always for simplicity on touch) */}
+                   <div className="flex gap-2 pl-2 border-l border-gray-100">
+                      <button 
+                        onClick={(e) => { e.stopPropagation(); openEditTransaction(t); }}
+                        className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-full transition"
+                      >
+                        <Pencil size={16} />
+                      </button>
+                      <button 
+                         onClick={(e) => { e.stopPropagation(); handleDeleteTransaction(t.id); }}
+                         className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-full transition"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                   </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const AddCardForm = ({ onSave, onCancel }) => {
+     const [formData, setFormData] = useState({
+      storeName: '',
+      realAmount: '',
+      giftAmount: '',
+      cardNumber: '',
+      location: '',
+      startDate: new Date().toISOString().split('T')[0],
+      discountString: '100' // 默认无折扣
+    });
+
+    const handleSubmit = (e) => {
+      e.preventDefault();
+      const total = Number(formData.realAmount || 0) + Number(formData.giftAmount || 0);
+      onSave({ ...formData, balance: total });
+    };
+
+    return (
+      <div className="fixed inset-0 bg-gray-100 z-50 overflow-y-auto">
+        <div className="max-w-md mx-auto bg-white min-h-screen shadow-xl">
+          <div className="sticky top-0 bg-white z-10 px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+            <button onClick={onCancel} className="p-2 -ml-2 text-gray-500"><X size={24} /></button>
+            <h2 className="font-bold text-lg text-gray-800">添加新卡片</h2>
+            <div className="w-8"></div>
+          </div>
+
+          <form onSubmit={handleSubmit} className="p-6 space-y-6">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">店铺名称 <span className="text-red-500">*</span></label>
+              <input required type="text" className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition" placeholder="例如：星巴克、Tony理发店" 
+                value={formData.storeName} onChange={e => setFormData({...formData, storeName: e.target.value})} />
+            </div>
+            
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">会员折扣 (%) <span className="text-red-500">*</span></label>
+              <p className="text-xs text-gray-500 mb-1">例如：80 表示 8折, 100 表示无折扣</p>
+              <div className="relative">
+                <input required type="number" min="1" max="100" className="w-full p-3 pr-10 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition" placeholder="100" 
+                  value={formData.discountString} onChange={e => setFormData({...formData, discountString: e.target.value})} />
+                <span className="absolute right-3 top-3.5 text-gray-400 font-bold">%</span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">实际充值 (元) <span className="text-red-500">*</span></label>
+                <input required type="number" className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition" placeholder="0.00" 
+                  value={formData.realAmount} onChange={e => setFormData({...formData, realAmount: e.target.value})} />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">赠送金额 (元)</label>
+                <input type="number" className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition" placeholder="0.00" 
+                  value={formData.giftAmount} onChange={e => setFormData({...formData, giftAmount: e.target.value})} />
+              </div>
+            </div>
+            
+            <div className="p-4 bg-blue-50 rounded-xl flex justify-between items-center text-blue-800">
+              <span className="text-sm font-medium">初始总余额</span>
+              <span className="text-xl font-bold">¥ {Number(Number(formData.realAmount || 0) + Number(formData.giftAmount || 0)).toLocaleString()}</span>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">会员卡号 (选填)</label>
+              <input type="text" className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition" placeholder="NO.888888" 
+                value={formData.cardNumber} onChange={e => setFormData({...formData, cardNumber: e.target.value})} />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">店铺位置 (选填)</label>
+              <div className="relative">
+                <MapPin size={18} className="absolute left-3 top-3.5 text-gray-400" />
+                <input type="text" className="w-full p-3 pl-10 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition" placeholder="例如：万象城B1层" 
+                  value={formData.location} onChange={e => setFormData({...formData, location: e.target.value})} />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">开卡时间 (选填)</label>
+              <input type="date" className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition" 
+                value={formData.startDate} onChange={e => setFormData({...formData, startDate: e.target.value})} />
+            </div>
+
+            <button type="submit" className="w-full py-4 bg-gray-900 text-white rounded-xl font-bold text-lg shadow-lg hover:bg-gray-800 transition transform hover:-translate-y-1">
+              确认建卡
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  };
+
+  // Main Render
+  return (
+    <div className="min-h-screen bg-gray-50 font-sans text-gray-900 selection:bg-blue-100">
+      
+      {/* HEADER */}
+      {view === 'dashboard' && (
+        <>
+          <header className="bg-white sticky top-0 z-20 px-6 py-4 border-b border-gray-100 shadow-sm flex justify-between items-center">
+            <div className="flex items-center gap-2 text-blue-600">
+              <Wallet className="fill-current" size={24} />
+              <h1 className="font-bold text-xl tracking-tight text-gray-900">卡包管家</h1>
+            </div>
+            
+            <div className="flex gap-3">
+              {/* View Toggle */}
+              <div className="flex bg-gray-100 p-1 rounded-lg items-center">
+                <button 
+                  onClick={() => setViewMode('list')}
+                  className={`p-1.5 rounded-md transition ${viewMode === 'list' ? 'bg-white shadow text-blue-600' : 'text-gray-400 hover:text-gray-600'}`}
+                >
+                  <LayoutList size={18} />
+                </button>
+                <button 
+                  onClick={() => setViewMode('grid')}
+                  className={`p-1.5 rounded-md transition ${viewMode === 'grid' ? 'bg-white shadow text-blue-600' : 'text-gray-400 hover:text-gray-600'}`}
+                >
+                  <LayoutGrid size={18} />
+                </button>
+              </div>
+
+              <button 
+                onClick={() => setView('add')}
+                className="bg-gray-900 text-white px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-1 hover:bg-gray-800 transition active:scale-95"
+              >
+                <Plus size={16} /> 记新卡
+              </button>
+            </div>
+          </header>
+
+          <main className="max-w-xl mx-auto p-6 pb-20">
+            {/* Total Balance Card */}
+            <div className="bg-gray-900 rounded-2xl p-6 text-white shadow-xl mb-8">
+               <div className="text-gray-400 text-sm mb-1">所有卡片总余额</div>
+               <div className="text-4xl font-bold font-mono tracking-tight">¥ {totalBalance.toLocaleString()}</div>
+               <div className="mt-4 flex gap-6">
+                 <div>
+                   <div className="text-xs text-gray-500">持有卡片</div>
+                   <div className="font-bold text-lg">{cards.length} <span className="text-xs font-normal text-gray-600">张</span></div>
+                 </div>
+                 <div>
+                   <div className="text-xs text-gray-500">最近消费</div>
+                   <div className="font-bold text-lg text-gray-300">--</div>
+                 </div>
+               </div>
+            </div>
+
+            {/* Grid */}
+            <h2 className="font-bold text-gray-800 mb-4 flex items-center gap-2">
+              <CreditCard size={18} /> 我的卡片
+            </h2>
+            
+            {cards.length === 0 ? (
+               <div className="text-center py-16 bg-white rounded-2xl border border-dashed border-gray-200">
+                 <div className="bg-gray-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 text-gray-400">
+                   <CreditCard size={32} />
+                 </div>
+                 <h3 className="text-gray-900 font-bold">还没有卡片</h3>
+                 <p className="text-gray-500 text-sm mt-1 mb-4">记录你的第一张储值卡吧</p>
+                 <button onClick={() => setView('add')} className="text-blue-600 font-medium hover:underline">点击添加</button>
+               </div>
+            ) : (
+              <div className={viewMode === 'grid' ? 'grid grid-cols-2 gap-4' : 'space-y-4'}>
+                {cards.map(card => (
+                  <CardItem 
+                    key={card.id} 
+                    card={card} 
+                    mode={viewMode}
+                    onClick={() => { setActiveCard(card); setView('detail'); }} 
+                  />
+                ))}
+              </div>
+            )}
+          </main>
+        </>
+      )}
+
+      {/* Modals & Sub-views */}
+      {view === 'add' && <AddCardForm onSave={handleAddCard} onCancel={() => setView('dashboard')} />}
+      {view === 'detail' && (
+        <>
+          <DetailView />
+          {showEditModal && (
+            <EditCardModal 
+              card={activeCard} 
+              onSave={handleUpdateCard} 
+              onCancel={() => setShowEditModal(false)} 
+            />
+          )}
+        </>
+      )}
+      {showTransactionModal && activeCard && (
+        <TransactionModal 
+          type={transactionType} 
+          initialData={editingTransaction}
+          cardDiscount={activeCard.discount} // 传递当前卡片的折扣率
+          onClose={() => { setShowTransactionModal(false); setEditingTransaction(null); }} 
+          onConfirm={handleSaveTransaction} 
+        />
+      )}
+
+    </div>
+  );
+}
